@@ -524,6 +524,7 @@ Perl_grok_numeric_radix(pTHX_ const char **sp, const char *send)
 
     if (IN_LC(LC_NUMERIC)) {
         DECLARATION_FOR_LC_NUMERIC_MANIPULATION;
+        CLANG_DIAG_IGNORE_STMT(-Wthread-safety);
         STORE_LC_NUMERIC_FORCE_TO_UNDERLYING();
         {
             STRLEN len;
@@ -535,6 +536,7 @@ Perl_grok_numeric_radix(pTHX_ const char **sp, const char *send)
             }
         }
         RESTORE_LC_NUMERIC();
+        CLANG_DIAG_RESTORE_STMT;
     }
     /* always try "." if numeric radix didn't match because
      * we may have data from different locales mixed */

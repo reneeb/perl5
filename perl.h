@@ -5560,6 +5560,17 @@ typedef struct am_table_short AMTS;
                     } STMT_END
 #  endif
 
+/*  Microsoft documentation reads:
+ *     "The localeconv function declared in locale.h now works correctly when
+ *      per-thread locale is enabled. In previous versions of the library, this
+ *      function would return the lconv data for the global locale, not the
+ *      thread's locale."
+ *  "now" refers to VS 2015.
+ */
+#if defined(WIN32) && defined(USE_THREAD_SAFE_LOCALE) && _MSC_VER < 1900
+#    define TS_W32_BROKEN_LOCALECONV
+#endif
+
 #  if ! defined(USE_ITHREADS) || defined(USE_THREAD_SAFE_LOCALE)
 #    define LOCALE_INIT
 #    define LOCALE_LOCK

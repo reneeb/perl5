@@ -2163,7 +2163,22 @@ localeconv()
 #  else
         LOCALE_LOCK;    /* Prevent interference with other threads using
                            localeconv() */
+#    ifdef TS_W32_BROKEN_LOCALECONV
+        /* This is a workaround for a Windows bug prior to VS 15, in which
+         * localeconv only looks at the global locale.  We toggle to the global
+         * locale; populate the return; then toggle back. */
 
+        save_monetary_thread = savepv(Perl_setlocale(LC_MONETARY, NULL));
+        save_numeric_thread  = savepv(Perl_setlocale(LC_NUMERIC, NULL));
+
+        _configthreadlocale(_DISABLE_PER_THREAD_LOCALE);
+
+        save_monetary_global = savepv(Perl_setlocale(LC_MONETARY, NULL));
+        save_numeric_global  = savepv(Perl_setlocale(LC_NUMERIC, NULL));
+
+        Perl_setlocale(LC_MONETARY, save_monetary_thread);
+        Perl_setlocale(LC_NUMERIC,  save_numeric_thread);
+#    endif
         lcbuf = localeconv();
 #  endif
 	if (lcbuf) {
@@ -2223,6 +2238,20 @@ localeconv()
             freelocale(cur);
         }
 #  else
+#    ifdef TS_W32_BROKEN_LOCALECONV
+        Perl_setlocale(LC_MONETARY, save_monetary_global);
+        Perl_setlocale(LC_NUMERIC, save_numeric_global);
+
+        _configthreadlocale(_ENABLE_PER_THREAD_LOCALE);
+
+        Perl_setlocale(LC_MONETARY, save_monetary_thread);
+        Perl_setlocale(LC_NUMERIC, save_numeric_thread);
+
+        Safefree(save_monetary_global);
+        Safefree(save_monetary_thread);
+        Safefree(save_numeric_global);
+        Safefree(save_numeric_thread);
+#    endif
         LOCALE_UNLOCK;
 #  endif
         RESTORE_LC_NUMERIC();

@@ -1334,14 +1334,21 @@ S_new_numeric(pTHX_ const char *newnum)
     PL_numeric_underlying = TRUE;
     PL_numeric_standard = isNAME_C_OR_POSIX(save_newnum);
 
+#ifndef TS_W32_BROKEN_LOCALECONV
+
     /* If its name isn't C nor POSIX, it could still be indistinguishable from
-     * them */
+     * them, but we can't rely on this on systems that use a broken
+     * localeconv() implementing nl_langinfo (though actually the code above is
+     * reliable, it just has to switch into the global locale, which would
+     * cause issues for any thread running the global locale) */
     if (! PL_numeric_standard) {
         PL_numeric_standard = cBOOL(strEQ(".", my_nl_langinfo(PERL_RADIXCHAR,
                                             FALSE /* Don't toggle locale */  ))
                                  && strEQ("",  my_nl_langinfo(PERL_THOUSEP,
                                                               FALSE)));
     }
+
+#endif
 
     /* Save the new name if it isn't the same as the previous one, if any */
     if (! PL_numeric_name || strNE(PL_numeric_name, save_newnum)) {
@@ -2522,6 +2529,16 @@ S_my_nl_langinfo(const int item, bool toggle)
         const char * temp;
         DECLARATION_FOR_LC_NUMERIC_MANIPULATION;
 
+#    ifdef TS_W32_BROKEN_LOCALECONV
+
+        const char * save_global;
+        const char * save_thread;
+        int needed_size;
+        char * ptr;
+        char * e;
+        char * item_start;
+
+#    endif
 #  endif
 #  ifdef HAS_STRFTIME
 
@@ -2542,8 +2559,7 @@ S_my_nl_langinfo(const int item, bool toggle)
         switch (item) {
             Size_t len;
 
-            /* These 2 are unimplemented */
-            case PERL_CODESET:
+            /* This is unimplemented */
             case PERL_ERA:      /* For use with strftime() %E modifier */
 
             default:
@@ -2555,6 +2571,50 @@ S_my_nl_langinfo(const int item, bool toggle)
             case PERL_NOEXPR:    return "^[-0nN]";
             case PERL_NOSTR:     return "no";
 
+            case PERL_CODESET:
+
+#  ifndef WIN32
+
+                return "";
+
+#  else
+
+                {
+                    const char * p;
+                    const char * name = my_setlocale(LC_CTYPE, NULL);
+                    const char * first = (const char *) strchr(name, '.');
+
+                    if (! first) {
+                        goto has_nondigit;
+                    }
+
+                    first++;
+                    p = first;
+
+                    while (*p) {
+                        if (! isDIGIT(*p)) {
+                            goto has_nondigit;
+                        }
+
+                        p++;
+                    }
+
+                    save_to_buffer("CP", &PL_langinfo_buf,
+                                         &PL_langinfo_bufsize, 0);
+                    retval = save_to_buffer(first, &PL_langinfo_buf,
+                                            &PL_langinfo_bufsize, 2);
+
+                    return retval;
+
+                  has_nondigit:
+
+                    if (isNAME_C_OR_POSIX(name)) {
+                        return "ANSI_X3.4-1968";
+                    }
+
+                    return "";
+
+#  endif
 #  ifdef HAS_LOCALECONV
 
             case PERL_CRNCYSTR:
@@ -2564,6 +2624,21 @@ S_my_nl_langinfo(const int item, bool toggle)
 
                 LOCALE_LOCK;    /* Prevent interference with other threads
                                    using localeconv() */
+
+#    ifdef TS_W32_BROKEN_LOCALECONV
+
+                /* This is a workaround for a Windows bug prior to VS 15.
+                 * What we do here is, while locked, switch to the global
+                 * locale so localeconv() works; then switch back just before
+                 * the unlock.  This can screw things up if some thread is
+                 * already using the global locale.  It can't be helped though, as XXX */
+
+                save_thread = savepv(my_setlocale(LC_MONETARY, NULL));
+                _configthreadlocale(_DISABLE_PER_THREAD_LOCALE);
+                save_global= savepv(my_setlocale(LC_MONETARY, NULL));
+                my_setlocale(LC_MONETARY, save_thread);
+
+#    endif
 
                 lc = localeconv();
                 if (   ! lc
@@ -2590,10 +2665,75 @@ S_my_nl_langinfo(const int item, bool toggle)
                     PL_langinfo_buf[0] = '+';
                 }
 
+#    ifdef TS_W32_BROKEN_LOCALECONV
+
+                my_setlocale(LC_MONETARY, save_global);
+                _configthreadlocale(_ENABLE_PER_THREAD_LOCALE);
+                my_setlocale(LC_MONETARY, save_thread);
+                Safefree(save_global);
+                Safefree(save_thread);
+
+#    endif
+
                 LOCALE_UNLOCK;
                 break;
 
+#    ifdef TS_W32_BROKEN_LOCALECONV
+
             case PERL_RADIXCHAR:
+
+                if (toggle) {
+                    STORE_LC_NUMERIC_FORCE_TO_UNDERLYING();
+                }
+
+                if (PL_langinfo_bufsize < 10) {
+                    PL_langinfo_bufsize = 10;
+                    Renew(PL_langinfo_buf, PL_langinfo_bufsize, char);
+                }
+
+                needed_size = my_snprintf(PL_langinfo_buf, PL_langinfo_bufsize,
+                                          "%.1f", 1.5);
+                if (needed_size >= (int) PL_langinfo_bufsize) {
+                    PL_langinfo_bufsize = needed_size + 1;
+                    Renew(PL_langinfo_buf, PL_langinfo_bufsize, char);
+                    needed_size = my_snprintf(PL_langinfo_buf, PL_langinfo_bufsize,
+                                             "%.1f", 1.5);
+                    assert(needed_size < (int) PL_langinfo_bufsize);
+                }
+
+                ptr = PL_langinfo_buf;
+                e = PL_langinfo_buf + PL_langinfo_bufsize;
+                while (ptr < e && *ptr != '1') {
+                    ptr++;
+                }
+                ptr++;
+                item_start = ptr;
+                while (ptr < e && *ptr != '5') {
+                    ptr++;
+                }
+
+                if (ptr >= e) {
+                    PL_langinfo_buf[0] = '?';
+                    PL_langinfo_buf[1] = '\0';
+                }
+                else {
+                    *ptr = '\0';
+                    Move(item_start, PL_langinfo_buf, ptr - PL_langinfo_buf, char);
+                }
+
+                if (toggle) {
+                    RESTORE_LC_NUMERIC();
+                }
+
+                retval = PL_langinfo_buf;
+                break;
+
+#    else
+
+            case PERL_RADIXCHAR:
+
+#    endif
+
             case PERL_THOUSEP:
 
                 if (toggle) {
@@ -2602,6 +2742,15 @@ S_my_nl_langinfo(const int item, bool toggle)
 
                 LOCALE_LOCK;    /* Prevent interference with other threads
                                    using localeconv() */
+
+#    ifdef TS_W32_BROKEN_LOCALECONV
+
+                save_thread = savepv(my_setlocale(LC_NUMERIC, NULL));
+                _configthreadlocale(_DISABLE_PER_THREAD_LOCALE);
+                save_global = savepv(my_setlocale(LC_NUMERIC, NULL));
+                my_setlocale(LC_NUMERIC, save_thread);
+
+#    endif
 
                 lc = localeconv();
                 if (! lc) {
@@ -2619,6 +2768,16 @@ S_my_nl_langinfo(const int item, bool toggle)
                 retval = save_to_buffer(temp, &PL_langinfo_buf,
                                         &PL_langinfo_bufsize, 0);
 
+#    ifdef TS_W32_BROKEN_LOCALECONV
+
+                my_setlocale(LC_NUMERIC, save_global);
+                _configthreadlocale(_ENABLE_PER_THREAD_LOCALE);
+                my_setlocale(LC_NUMERIC, save_thread);
+                Safefree(save_global);
+                Safefree(save_thread);
+
+#    endif
+
                 LOCALE_UNLOCK;
 
                 if (toggle) {
@@ -2627,6 +2786,52 @@ S_my_nl_langinfo(const int item, bool toggle)
 
                 break;
 
+#    if 0
+                if (PL_langinfo_bufsize < 10) {
+                    PL_langinfo_bufsize = 10;
+                    Renew(PL_langinfo_buf, PL_langinfo_bufsize, char);
+                }
+
+                needed_size = GetNumberFormatEx(PL_numeric_name, 0, "1234.5", NULL, PL_langinfo_buf, PL_langinfo_bufsize);
+                DEBUG_L(PerlIO_printf(Perl_debug_log,
+                    "%s: %d: return from GetNumber, count=%d, val=%s\n",
+                    __FILE__, __LINE__, needed_size, PL_langinfo_buf));
+
+                if (needed_size >= (int) PL_langinfo_bufsize) {
+                    PL_langinfo_bufsize = needed_size + 1;
+                    Renew(PL_langinfo_buf, PL_langinfo_bufsize, char);
+                    needed_size = my_snprintf(PL_langinfo_buf, PL_langinfo_bufsize,
+                                             "%.1f", 1.5);
+                    assert(needed_size < (int) PL_langinfo_bufsize);
+                }
+
+                ptr = PL_langinfo_buf;
+                e = PL_langinfo_buf + PL_langinfo_bufsize;
+                while (ptr < e && *ptr != '1') {
+                    ptr++;
+                }
+                ptr++;
+                item_start = ptr;
+                while (ptr < e && *ptr != '5') {
+                    ptr++;
+                }
+
+                if (ptr >= e) {
+                    PL_langinfo_buf[0] = '?';
+                    PL_langinfo_buf[1] = '\0';
+                }
+                else {
+                    *ptr = '\0';
+                    Move(item_start, PL_langinfo_buf, ptr - PL_langinfo_buf, char);
+                }
+
+                if (toggle) {
+                    RESTORE_LC_NUMERIC();
+                }
+
+                retval = PL_langinfo_buf;
+                break;
+#    endif
 #  endif
 #  ifdef HAS_STRFTIME
 
@@ -5004,6 +5209,20 @@ This is for code that has not yet or cannot be updated to handle multi-threaded
 locale operation.  As long as only a single thread is so-converted, everything
 works fine, as all the other threads continue to ignore the global one, so only
 this thread looks at it.
+
+However, on Windows systems this isn't quite true prior to Visual Studio 15,
+at which point Microsoft fixed a bug.  A race can occur if you use the
+following operations on earlier Windows platforms:
+
+=over
+
+=item L<POSIX::localeconv|POSIX/localeconv>
+
+=item L<I18N::Langinfo>, items C<PERL_CRNCYSTR> and C<PERL_THOUSEP>
+
+=item L<perlapi/Perl_langinfo>, items C<PERL_CRNCYSTR> and C<PERL_THOUSEP>
+
+=back
 
 Without this function call, threads that use the L<C<setlocale(3)>> system
 function will not work properly, as all the locale-sensitive functions will
